@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Indonesia & Asia-Pacific Business Cycles</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<style>
+  :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color-scheme: light dark; }
+  body { margin: 0; background: Canvas; color: CanvasText; }
+  .wrap { max-width: 1180px; margin: auto; padding: 28px 22px 60px; }
+  h1 { margin-bottom: 4px; font-size: clamp(28px, 4vw, 44px); }
+  .sub { opacity: .72; margin: 0 0 22px; }
+  .controls, .card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 14px; padding: 16px; margin: 14px 0; background: color-mix(in srgb, Canvas 95%, CanvasText 5%); }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: end; }
+  label { display: grid; gap: 5px; font-size: 13px; }
+  select, input, button { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, CanvasText 22%, transparent); background: Canvas; color: CanvasText; }
+  button { cursor: pointer; }
+  .grid { display: grid; grid-template-columns: 1.55fr 1fr; gap: 14px; }
+  @media(max-width: 850px){ .grid { grid-template-columns: 1fr; } }
+  svg { width: 100%; height: auto; overflow: visible; }
+  .axis text { fill: CanvasText; opacity: .72; }
+  .axis path, .axis line { stroke: color-mix(in srgb, CanvasText 25%, transparent); }
+  .gridline line { stroke: color-mix(in srgb, CanvasText 10%, transparent); }
+  .gridline path { display:none; }
+  .tooltip { position: fixed; pointer-events:none; background:#111; color:#fff; padding:8px 10px; border-radius:8px; font-size:12px; opacity:0; z-index:10; box-shadow:0 4px 18px #0004; }
+  .legend { display:flex; flex-wrap:wrap; gap:10px 14px; font-size:12px; margin-top:8px; }
+  .legend span { display:inline-flex; align-items:center; gap:6px; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
+  .note { font-size: 13px; opacity: .72; }
+  .metric { font-size: 28px; font-weight: 700; }
+  .small { font-size: 12px; opacity: .7; }
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .stat { padding:12px; border-radius:10px; background: color-mix(in srgb, CanvasText 6%, transparent); }
+  @media(max-width: 600px){ .stats { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Indonesia & Asia-Pacific Business Cycles</h1>
+  <p class="sub">HP-filtered quarterly real GDP, private consumption and investment. Compare volatility, persistence and synchronisation with Indonesia.</p>
+
+  <div class="controls">
+    <label>Countries (Cmd/Ctrl-click for multiple)
+      <select id="countrySelect" multiple size="6" style="min-width:220px"></select>
+    </label>
+    <label>Metric
+      <select id="metric">
+        <option value="cycle">Deviation from trend</option>
+        <option value="yoy_growth">Year-on-year growth</option>
+      </select>
+    </label>
+    <label>Component
+      <select id="component">
+        <option value="GDP">GDP</option>
+        <option value="Consumption">Private consumption</option>
+        <option value="Investment">Investment</option>
+      </select>
+    </label>
+    <label>Start year <input id="startYear" type="number" value="1975" min="1975" max="2030" /></label>
+    <button id="reset">Indonesia + ASEAN</button>
+    <label>Load cycle CSV manually <input id="fileCycles" type="file" accept=".csv" /></label>
+    <label>Load stats CSV manually <input id="fileStats" type="file" accept=".csv" /></label>
+  </div>
+
+  <div class="card">
+    <h2 id="lineTitle">Business-cycle component</h2>
+    <div id="lineChart"></div>
+    <div id="legend" class="legend"></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2 id="barTitle">Correlation with Indonesia</h2>
+      <div id="barChart"></div>
+      <p class="note">Contemporaneous correlation of HP-filtered real-component cycles over each country’s overlapping sample with Indonesia.</p>
+    </div>
+    <div class="card">
+      <h2>Selected-country statistics</h2>
+      <div id="statsPanel" class="stats"></div>
+      <p class="note">Volatility is the standard deviation of percentage deviations from trend. Relative volatility and domestic-GDP correlation use the component's overlapping GDP sample. Persistence is the AR(1) correlation.</p>
+    </div>
+  </div>
+
+  <p class="note">Data files are produced by <code>LS3_business_cycles.qmd</code>. If automatic loading fails when opening this HTML directly, use the two file pickers above, or serve the folder locally with <code>python3 -m http.server</code>.</p>
+</div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const cycleFile = "d3_data/business_cycle_data.csv";
+const statsFile = "d3_data/business_cycle_stats.csv";
+let cycles = [], stats = [];
+const parseDate = d3.timeParse("%Y-%m-%d");
+const fmtDate = d3.timeFormat("%Y Q%q");
+const palette = d3.schemeTableau10;
+const tooltip = d3.select("#tooltip");
+
+function parseCycles(rows){
+  return rows.map(d => ({...d, component:d.component||"GDP", date:parseDate(d.date), cycle:+d.cycle, yoy_growth:+d.yoy_growth, qoq_annualised:+d.qoq_annualised})).filter(d=>d.date);
+}
+function parseStats(rows){
+  return rows.map(d => ({...d, component:d.component||"GDP", cycle_sd:+d.cycle_sd, relative_volatility_to_gdp:+d.relative_volatility_to_gdp, corr_with_domestic_gdp:+d.corr_with_domestic_gdp, persistence_ar1:+d.persistence_ar1, corr_with_indonesia:+d.corr_with_indonesia, mean_yoy_growth:+d.mean_yoy_growth, observations:+d.observations}));
+}
+
+async function autoLoad(){
+  try {
+    const [c,s] = await Promise.all([d3.csv(cycleFile), d3.csv(statsFile)]);
+    cycles=parseCycles(c); stats=parseStats(s); init();
+  } catch(e) {
+    d3.select("#lineChart").html('<p class="note">Automatic data loading is unavailable in this browser context. Run the R notebook, then select <b>business_cycle_data.csv</b> and <b>business_cycle_stats.csv</b> above.</p>');
+  }
+}
+
+function init(){
+  const countries=[...new Set(cycles.map(d=>d.country))].sort((a,b)=>a.localeCompare(b));
+  const sel=d3.select("#countrySelect");
+  sel.selectAll("option").data(countries).join("option").attr("value",d=>d).text(d=>d);
+  const defaults=new Set(["Indonesia","Malaysia","Thailand","Philippines","Singapore","Vietnam"]);
+  sel.selectAll("option").property("selected",d=>defaults.has(d));
+  render();
+}
+
+function selectedCountries(){
+  return Array.from(document.querySelector("#countrySelect").selectedOptions).map(o=>o.value);
+}
+
+function render(){
+  if(!cycles.length) return;
+  const selected=selectedCountries();
+  const metric=document.querySelector("#metric").value;
+  const component=document.querySelector("#component").value;
+  const start=+document.querySelector("#startYear").value;
+  drawLines(selected,metric,start,component);
+  drawBars(component);
+  drawStats(selected[0] || "Indonesia",component);
+}
+
+function drawLines(selected,metric,startYear,component){
+  const data=cycles.filter(d=>d.component===component && selected.includes(d.country) && d.date.getFullYear()>=startYear && Number.isFinite(d[metric]));
+  if(!data.length){
+    d3.select("#lineChart").html(`<p class="note">No ${component.toLowerCase()} observations are available for the selected countries and dates.</p>`);
+    d3.select("#legend").html("");
+    d3.select("#lineTitle").text(`${component}: no available data`);
+    return;
+  }
+  const W=920,H=450,m={t:20,r:28,b:42,l:58};
+  const svg=d3.select("#lineChart").html("").append("svg").attr("viewBox",`0 0 ${W} ${H}`);
+  const x=d3.scaleTime().domain(d3.extent(data,d=>d.date)).range([m.l,W-m.r]);
+  const ext=d3.extent(data,d=>d[metric]); const pad=(ext[1]-ext[0]||1)*.12;
+  const y=d3.scaleLinear().domain([Math.min(ext[0]-pad,0),Math.max(ext[1]+pad,0)]).nice().range([H-m.b,m.t]);
+  svg.append("g").attr("class","gridline").attr("transform",`translate(${m.l},0)`).call(d3.axisLeft(y).tickSize(-(W-m.l-m.r)).tickFormat(""));
+  svg.append("line").attr("x1",m.l).attr("x2",W-m.r).attr("y1",y(0)).attr("y2",y(0)).attr("stroke","currentColor").attr("opacity",.25);
+  svg.append("g").attr("class","axis").attr("transform",`translate(0,${H-m.b})`).call(d3.axisBottom(x).ticks(W<700?5:8));
+  svg.append("g").attr("class","axis").attr("transform",`translate(${m.l},0)`).call(d3.axisLeft(y).ticks(7).tickFormat(d=>`${d}%`));
+  const color=d3.scaleOrdinal().domain(selected).range(palette.concat(d3.schemeSet3));
+  const line=d3.line().defined(d=>Number.isFinite(d[metric])).x(d=>x(d.date)).y(d=>y(d[metric]));
+  d3.group(data,d=>d.country).forEach((vals,country)=>{
+    svg.append("path").datum(vals).attr("fill","none").attr("stroke",color(country)).attr("stroke-width",country==="Indonesia"?3:1.8).attr("d",line)
+      .on("mousemove",ev=>tooltip.style("opacity",1).style("left",(ev.clientX+12)+"px").style("top",(ev.clientY+12)+"px").html(country))
+      .on("mouseleave",()=>tooltip.style("opacity",0));
+  });
+  const shown=[...new Set(data.map(d=>d.country))];
+  d3.select("#legend").html("").selectAll("span").data(shown).join("span").html(d=>`<i class="dot" style="background:${color(d)}"></i>${d}`);
+  d3.select("#lineTitle").text(metric==="cycle"?`${component}: deviation from trend`:`${component}: year-on-year growth`);
+}
+
+function drawBars(component){
+  const data=stats.filter(d=>d.component===component && d.country!=="Indonesia" && Number.isFinite(d.corr_with_indonesia)).sort((a,b)=>a.corr_with_indonesia-b.corr_with_indonesia);
+  d3.select("#barTitle").text(`${component} correlation with Indonesia`);
+  const W=560,H=Math.max(360,data.length*28+70),m={t:10,r:30,b:40,l:112};
+  const svg=d3.select("#barChart").html("").append("svg").attr("viewBox",`0 0 ${W} ${H}`);
+  const x=d3.scaleLinear().domain([-1,1]).range([m.l,W-m.r]);
+  const y=d3.scaleBand().domain(data.map(d=>d.country)).range([m.t,H-m.b]).padding(.18);
+  svg.append("g").attr("class","axis").attr("transform",`translate(0,${H-m.b})`).call(d3.axisBottom(x).ticks(5));
+  svg.append("g").attr("class","axis").attr("transform",`translate(${m.l},0)`).call(d3.axisLeft(y));
+  svg.append("line").attr("x1",x(0)).attr("x2",x(0)).attr("y1",m.t).attr("y2",H-m.b).attr("stroke","currentColor").attr("opacity",.35);
+  svg.selectAll("rect").data(data).join("rect")
+    .attr("x",d=>Math.min(x(0),x(d.corr_with_indonesia))).attr("y",d=>y(d.country))
+    .attr("width",d=>Math.abs(x(d.corr_with_indonesia)-x(0))).attr("height",y.bandwidth())
+    .attr("fill",d=>d.country==="Indonesia"?palette[0]:palette[1])
+    .on("mousemove",(ev,d)=>tooltip.style("opacity",1).style("left",(ev.clientX+12)+"px").style("top",(ev.clientY+12)+"px").html(`${d.country}: ${d.corr_with_indonesia.toFixed(2)}`))
+    .on("mouseleave",()=>tooltip.style("opacity",0));
+}
+
+function drawStats(country,component){
+  const d=stats.find(x=>x.country===country && x.component===component);
+  if(!d){
+    d3.select("#statsPanel").html(`<div class="stat"><div class="small">${country}</div><div>No ${component.toLowerCase()} data</div></div>`);
+    return;
+  }
+  const cards=[
+    ["Country",d.country],
+    ["Component",d.component],
+    ["Observations",Number.isFinite(d.observations)?d.observations:"—"],
+    ["Cycle volatility",Number.isFinite(d.cycle_sd)?d.cycle_sd.toFixed(2)+" pp":"—"],
+    ["Volatility / GDP",Number.isFinite(d.relative_volatility_to_gdp)?d.relative_volatility_to_gdp.toFixed(2)+"×":"—"],
+    ["Corr. with domestic GDP",Number.isFinite(d.corr_with_domestic_gdp)?d.corr_with_domestic_gdp.toFixed(2):"—"],
+    ["Persistence (AR1)",Number.isFinite(d.persistence_ar1)?d.persistence_ar1.toFixed(2):"—"],
+    ["Corr. with Indonesia",Number.isFinite(d.corr_with_indonesia)?d.corr_with_indonesia.toFixed(2):"—"],
+    ["Mean YoY growth",Number.isFinite(d.mean_yoy_growth)?d.mean_yoy_growth.toFixed(2)+"%":"—"]
+  ];
+  d3.select("#statsPanel").html("").selectAll("div").data(cards).join("div").attr("class","stat").html(x=>`<div class="small">${x[0]}</div><div class="metric">${x[1]}</div>`);
+}
+
+document.querySelector("#countrySelect").addEventListener("change",render);
+document.querySelector("#metric").addEventListener("change",render);
+document.querySelector("#component").addEventListener("change",render);
+document.querySelector("#startYear").addEventListener("input",render);
+document.querySelector("#reset").addEventListener("click",()=>{
+  const defaults=new Set(["Indonesia","Malaysia","Thailand","Philippines","Singapore","Vietnam"]);
+  d3.select("#countrySelect").selectAll("option").property("selected",d=>defaults.has(d)); render();
+});
+document.querySelector("#fileCycles").addEventListener("change",async e=>{
+  const text=await e.target.files[0].text(); cycles=parseCycles(d3.csvParse(text)); if(stats.length) init();
+});
+document.querySelector("#fileStats").addEventListener("change",async e=>{
+  const text=await e.target.files[0].text(); stats=parseStats(d3.csvParse(text)); if(cycles.length) init();
+});
+
+autoLoad();
+</script>
+</body>
+</html>
