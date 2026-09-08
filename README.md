@@ -62,7 +62,13 @@ and investment.
 
 ## View the D3 page
 
-After rendering the notebook, serve the project folder locally:
+The interactive page is published on GitHub Pages at
+<https://tuttinator.github.io/monetary-econ-business-cycle-analysis/>.
+The workflow in `.github/workflows/pages.yml` runs on every push to `main`;
+it publishes `business_cycles_d3.html` as the site's `index.html` alongside
+`d3_data/`, the rendered notebook HTML and the PDF.
+
+To view it locally after rendering the notebook, serve the project folder:
 
 ```bash
 python3 -m http.server 8000

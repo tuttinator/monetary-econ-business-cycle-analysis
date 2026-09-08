@@ -23,7 +23,11 @@
   .axis path, .axis line { stroke: color-mix(in srgb, CanvasText 25%, transparent); }
   .gridline line { stroke: color-mix(in srgb, CanvasText 10%, transparent); }
   .gridline path { display:none; }
-  .tooltip { position: fixed; pointer-events:none; background:#111; color:#fff; padding:8px 10px; border-radius:8px; font-size:12px; opacity:0; z-index:10; box-shadow:0 4px 18px #0004; }
+  .marker { stroke: Canvas; }
+  .tooltip { position: fixed; pointer-events:none; background:#111; color:#fff; padding:8px 10px; border-radius:8px; font-size:12px; opacity:0; z-index:10; box-shadow:0 4px 18px #0004; min-width: 180px; }
+  .tooltip .tt-head { font-weight: 600; margin-bottom: 4px; opacity: .85; }
+  .tooltip .tt-row { display:grid; grid-template-columns: 12px 1fr auto; gap:6px; align-items:center; line-height:1.5; }
+  .tooltip .tt-row b { font-variant-numeric: tabular-nums; }
   .legend { display:flex; flex-wrap:wrap; gap:10px 14px; font-size:12px; margin-top:8px; }
   .legend span { display:inline-flex; align-items:center; gap:6px; }
   .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
@@ -93,7 +97,17 @@ let cycles = [], stats = [];
 const parseDate = d3.timeParse("%Y-%m-%d");
 const fmtDate = d3.timeFormat("%Y Q%q");
 const palette = d3.schemeTableau10;
+// Fixed colour per country so the palette does not shift when the selection changes.
+const countryColours = {
+  "Indonesia":"#d62728","Malaysia":"#1f77b4","Thailand":"#2ca02c","Philippines":"#ff7f0e",
+  "Singapore":"#9467bd","Vietnam":"#8c564b","Australia":"#e377c2","New Zealand":"#7f7f7f",
+  "Japan":"#bcbd22","South Korea":"#17becf","China":"#a6761d","India":"#e6ab02","United States":"#1b9e77"
+};
+const fallbackColours = d3.scaleOrdinal(d3.schemeSet3);
+const colourFor = country => countryColours[country] || fallbackColours(country);
 const tooltip = d3.select("#tooltip");
+const fmtQuarter = d => `Q${Math.floor(d.getMonth()/3)+1} ${d.getFullYear()}`;
+const fmtValue = v => `${v>=0?"+":""}${v.toFixed(2)}%`;
 
 function parseCycles(rows){
   return rows.map(d => ({...d, component:d.component||"GDP", date:parseDate(d.date), cycle:+d.cycle, yoy_growth:+d.yoy_growth, qoq_annualised:+d.qoq_annualised})).filter(d=>d.date);
@@ -152,15 +166,44 @@ function drawLines(selected,metric,startYear,component){
   svg.append("line").attr("x1",m.l).attr("x2",W-m.r).attr("y1",y(0)).attr("y2",y(0)).attr("stroke","currentColor").attr("opacity",.25);
   svg.append("g").attr("class","axis").attr("transform",`translate(0,${H-m.b})`).call(d3.axisBottom(x).ticks(W<700?5:8));
   svg.append("g").attr("class","axis").attr("transform",`translate(${m.l},0)`).call(d3.axisLeft(y).ticks(7).tickFormat(d=>`${d}%`));
-  const color=d3.scaleOrdinal().domain(selected).range(palette.concat(d3.schemeSet3));
   const line=d3.line().defined(d=>Number.isFinite(d[metric])).x(d=>x(d.date)).y(d=>y(d[metric]));
-  d3.group(data,d=>d.country).forEach((vals,country)=>{
-    svg.append("path").datum(vals).attr("fill","none").attr("stroke",color(country)).attr("stroke-width",country==="Indonesia"?3:1.8).attr("d",line)
-      .on("mousemove",ev=>tooltip.style("opacity",1).style("left",(ev.clientX+12)+"px").style("top",(ev.clientY+12)+"px").html(country))
-      .on("mouseleave",()=>tooltip.style("opacity",0));
+  const series=d3.group(data,d=>d.country);
+  const paths=new Map();
+  series.forEach((vals,country)=>{
+    vals.sort((a,b)=>a.date-b.date);
+    const p=svg.append("path").datum(vals).attr("fill","none").attr("stroke",colourFor(country))
+      .attr("stroke-width",country==="Indonesia"?3:1.8).attr("d",line);
+    paths.set(country,p);
   });
+
+  // Hover: vertical guide, a marker on each line and every selected country's value at that quarter.
+  const dates=[...new Set(data.map(d=>+d.date))].sort((a,b)=>a-b).map(t=>new Date(t));
+  const bisect=d3.bisector(d=>d).center;
+  const guide=svg.append("line").attr("stroke","currentColor").attr("stroke-dasharray","3 3").attr("opacity",0).attr("y1",m.t).attr("y2",H-m.b);
+  const markers=svg.append("g").attr("opacity",0);
+  markers.selectAll("circle").data([...series.keys()]).join("circle").attr("r",4).attr("fill",d=>colourFor(d)).attr("class","marker").attr("stroke-width",1.5);
+  const byCountryDate=new Map([...series].map(([c,vals])=>[c,new Map(vals.map(d=>[+d.date,d]))]));
+  const metricLabel=metric==="cycle"?"deviation from trend":"year-on-year growth";
+
+  svg.append("rect").attr("x",m.l).attr("y",m.t).attr("width",W-m.l-m.r).attr("height",H-m.t-m.b).attr("fill","transparent")
+    .on("mousemove",ev=>{
+      const [mx]=d3.pointer(ev);
+      const date=dates[bisect(dates,x.invert(mx))];
+      const xs=x(date);
+      guide.attr("x1",xs).attr("x2",xs).attr("opacity",.6);
+      const rows=[...series.keys()].map(c=>({country:c,d:byCountryDate.get(c).get(+date)})).filter(r=>r.d && Number.isFinite(r.d[metric]))
+        .sort((a,b)=>b.d[metric]-a.d[metric]);
+      markers.attr("opacity",1).selectAll("circle").attr("visibility",c=>rows.some(r=>r.country===c)?"visible":"hidden")
+        .attr("cx",xs).attr("cy",c=>{const r=rows.find(r=>r.country===c);return r?y(r.d[metric]):0;});
+      paths.forEach((p,c)=>p.attr("opacity",rows.some(r=>r.country===c)?1:.35));
+      const html=`<div class="tt-head">${fmtQuarter(date)} · ${component} ${metricLabel}</div>`+
+        rows.map(r=>`<div class="tt-row"><i class="dot" style="background:${colourFor(r.country)}"></i><span>${r.country}</span><b>${fmtValue(r.d[metric])}</b></div>`).join("");
+      const left=Math.min(ev.clientX+14,window.innerWidth-260);
+      tooltip.style("opacity",1).style("left",left+"px").style("top",(ev.clientY+14)+"px").html(html);
+    })
+    .on("mouseleave",()=>{ guide.attr("opacity",0); markers.attr("opacity",0); paths.forEach(p=>p.attr("opacity",1)); tooltip.style("opacity",0); });
   const shown=[...new Set(data.map(d=>d.country))];
-  d3.select("#legend").html("").selectAll("span").data(shown).join("span").html(d=>`<i class="dot" style="background:${color(d)}"></i>${d}`);
+  d3.select("#legend").html("").selectAll("span").data(shown).join("span").html(d=>`<i class="dot" style="background:${colourFor(d)}"></i>${d}`);
   d3.select("#lineTitle").text(metric==="cycle"?`${component}: deviation from trend`:`${component}: year-on-year growth`);
 }
 
@@ -177,7 +220,7 @@ function drawBars(component){
   svg.selectAll("rect").data(data).join("rect")
     .attr("x",d=>Math.min(x(0),x(d.corr_with_indonesia))).attr("y",d=>y(d.country))
     .attr("width",d=>Math.abs(x(d.corr_with_indonesia)-x(0))).attr("height",y.bandwidth())
-    .attr("fill",d=>d.country==="Indonesia"?palette[0]:palette[1])
+    .attr("fill",d=>colourFor(d.country)).attr("opacity",.85)
     .on("mousemove",(ev,d)=>tooltip.style("opacity",1).style("left",(ev.clientX+12)+"px").style("top",(ev.clientY+12)+"px").html(`${d.country}: ${d.corr_with_indonesia.toFixed(2)}`))
     .on("mouseleave",()=>tooltip.style("opacity",0));
 }
